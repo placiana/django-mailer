@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from mailer.models import Message, DontSendEntry, MessageLog
+from mailer.models import Message, DontSendEntry, MessageLog, EmailConfiguration
 
 
 class MessageAdmin(admin.ModelAdmin):
@@ -18,3 +18,4 @@ class MessageLogAdmin(admin.ModelAdmin):
 admin.site.register(Message, MessageAdmin)
 admin.site.register(DontSendEntry, DontSendEntryAdmin)
 admin.site.register(MessageLog, MessageLogAdmin)
+admin.site.register(EmailConfiguration)

@@ -95,6 +95,8 @@ class Message(models.Model):
     priority = models.CharField(max_length=1, choices=PRIORITIES, default="2")
     # @@@ campaign?
     # @@@ content_type?
+    
+    configuration = models.ForeignKey('EmailConfiguration', null=True, blank=True)
 
     objects = MessageManager()
 
@@ -269,3 +271,39 @@ class MessageLog(models.Model):
             return email.subject
         else:
             return ""
+
+
+class EmailConfiguration(models.Model):
+
+    name = models.CharField(max_length=200, verbose_name='Configuration name')
+    email = models.EmailField()
+    host = models.CharField(max_length=100, verbose_name='Host')
+    port = models.IntegerField(verbose_name='Port')
+    username = models.CharField(max_length=100, verbose_name='Username')
+    password = models.CharField(max_length=100, verbose_name='Password')
+    use_tls = models.BooleanField(default=False, verbose_name='Enable TLS')
+    is_default = models.BooleanField(default=False, verbose_name='Is default configuration')
+
+    class Meta:
+        verbose_name = _('outgoing email configuration')
+        verbose_name_plural = _('outgoing email configurations')
+
+    def default_from_email(self):
+        return '{name} <{email}>'.format(name=self.name, email=self.email)
+
+    def __unicode__(self):
+        return self.default_from_email()
+
+    def save(self):
+        super(EmailConfiguration, self).save()
+        if self.is_default:  # Avoids infinite loop
+            last_used = (EmailConfiguration.objects
+                         .filter(is_default=True)
+                         .exclude(pk=self.pk))
+            if last_used.count() > 1:
+                raise Exception('There is another existing default configuration')
+            if last_used.count() == 1:
+                last_used = last_used.get()
+                last_used.is_default = False
+                last_used.save()
+

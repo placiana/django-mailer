@@ -106,7 +106,20 @@ def send_all():
         for message in prioritize():
             try:
                 if connection is None:
-                    connection = get_connection(backend=EMAIL_BACKEND)
+                    if message.configuration:
+                        config = message.configuration
+                        connection = get_connection(
+                            backend=EMAIL_BACKEND,
+                            host=config.host,
+                            port=config.port,
+                            username=config.username,
+                            password=config.password,
+                            use_tls=config.use_tls
+                        )
+                    else:
+                        connection = get_connection(backend=EMAIL_BACKEND)
+                    
+                    
                 logging.info("sending message '{0}' to {1}".format(
                     message.subject.encode("utf-8"),
                     u", ".join(message.to_addresses).encode("utf-8"))
