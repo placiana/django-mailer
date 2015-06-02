@@ -139,7 +139,8 @@ def send_all():
                 logging.info("message deferred due to failure: %s" % err)
                 MessageLog.objects.log(message, 3, log_message=str(err))  # @@@ avoid using literal result code # noqa
                 deferred += 1
-                # Get new connection, it case the connection itself has an error.
+            finally:
+                # Get new connection
                 connection = None
 
             # Check if we reached the limits for the current run
