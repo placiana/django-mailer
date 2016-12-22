@@ -291,7 +291,7 @@ class EmailConfiguration(models.Model):
     def default_from_email(self):
         return '{name} <{email}>'.format(name=self.name, email=self.email)
 
-    def __unicode__(self):
+    def __str__(self):
         return self.default_from_email()
 
     def save(self):
