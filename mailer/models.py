@@ -73,12 +73,12 @@ def db_to_email(data):
         return None
     else:
         try:
-            data = data.encode("ascii")
+            data = data.encode('utf-8')
         except AttributeError:
             pass
 
         try:
-            return pickle.loads(base64.decodestring(data))
+            return pickle.loads(base64.decodestring(data), encoding='utf-8')
         except (TypeError, pickle.UnpicklingError, base64.binascii.Error):
             try:
                 # previous method was to just do pickle.dumps(val)
