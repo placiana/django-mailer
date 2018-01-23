@@ -96,7 +96,7 @@ class Message(models.Model):
     # @@@ campaign?
     # @@@ content_type?
     
-    configuration = models.ForeignKey('EmailConfiguration', null=True, blank=True)
+    configuration = models.ForeignKey('EmailConfiguration', null=True, blank=True, on_delete=models.CASCADE)
 
     objects = MessageManager()
 
