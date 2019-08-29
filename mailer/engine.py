@@ -1,3 +1,5 @@
+from __future__ import unicode_literals
+
 import time
 import smtplib
 import logging
@@ -6,9 +8,13 @@ import lockfile
 from socket import error as socket_error
 
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from django.core.mail import get_connection
+from django.core.mail.message import make_msgid
 
-from mailer.models import Message, MessageLog
+from mailer.models import (
+    Message, MessageLog, RESULT_SUCCESS, RESULT_FAILURE, get_message_id,
+)
 
 
 # when queue is empty, how long to wait (in seconds) before checking again
@@ -17,6 +23,10 @@ EMPTY_QUEUE_SLEEP = getattr(settings, "MAILER_EMPTY_QUEUE_SLEEP", 30)
 # lock timeout value. how long to wait for the lock to become available.
 # default behavior is to never wait for the lock to be available.
 LOCK_WAIT_TIMEOUT = getattr(settings, "MAILER_LOCK_WAIT_TIMEOUT", -1)
+
+# allows for a different lockfile path. The default is a file
+# in the current working directory.
+LOCK_PATH = getattr(settings, "MAILER_LOCK_PATH", None)
 
 
 def prioritize():
@@ -38,6 +48,11 @@ def prioritize():
             yield lp_qs.order_by("when_added")[0]
         if Message.objects.non_deferred().using('default').count() == 0:
             break
+
+
+def ensure_message_id(msg):
+    if get_message_id(msg) is None:
+        msg.extra_headers['Message-ID'] = make_msgid()
 
 
 def _limits_reached(sent, deferred):
@@ -71,30 +86,58 @@ def _throttle_emails():
         time.sleep(EMAIL_THROTTLE)
 
 
+def acquire_lock():
+    logging.debug("acquiring lock...")
+    if LOCK_PATH is not None:
+        lock_file_path = LOCK_PATH
+    else:
+        lock_file_path = "send_mail"
+
+    lock = lockfile.FileLock(lock_file_path)
+
+    try:
+        lock.acquire(LOCK_WAIT_TIMEOUT)
+    except lockfile.AlreadyLocked:
+        logging.debug("lock already in place. quitting.")
+        return False, lock
+    except lockfile.LockTimeout:
+        logging.debug("waiting for the lock timed out. quitting.")
+        return False, lock
+    logging.debug("acquired.")
+    return True, lock
+
+
+def release_lock(lock):
+    logging.debug("releasing lock...")
+    lock.release()
+    logging.debug("released.")
+
+
+def _require_no_backend_loop(mailer_email_backend):
+    if mailer_email_backend == settings.EMAIL_BACKEND == 'mailer.backend.DbBackend':
+        raise ImproperlyConfigured('EMAIL_BACKEND and MAILER_EMAIL_BACKEND'
+                                   ' should not both be set to "{}"'
+                                   ' at the same time'
+                                   .format(settings.EMAIL_BACKEND))
+
+
 def send_all():
     """
     Send all eligible messages in the queue.
     """
     # The actual backend to use for sending, defaulting to the Django default.
     # To make testing easier this is not stored at module level.
-    EMAIL_BACKEND = getattr(
+    mailer_email_backend = getattr(
         settings,
         "MAILER_EMAIL_BACKEND",
         "django.core.mail.backends.smtp.EmailBackend"
     )
 
-    lock = lockfile.FileLock("send_mail")
+    _require_no_backend_loop(mailer_email_backend)
 
-    logging.debug("acquiring lock...")
-    try:
-        lock.acquire(LOCK_WAIT_TIMEOUT)
-    except lockfile.AlreadyLocked:
-        logging.debug("lock already in place. quitting.")
+    acquired, lock = acquire_lock()
+    if not acquired:
         return
-    except lockfile.LockTimeout:
-        logging.debug("waiting for the lock timed out. quitting.")
-        return
-    logging.debug("acquired.")
 
     start_time = time.time()
 
@@ -109,7 +152,7 @@ def send_all():
                     if message.configuration:
                         config = message.configuration
                         connection = get_connection(
-                            backend=EMAIL_BACKEND,
+                            backend=mailer_email_backend,
                             host=config.host,
                             port=config.port,
                             username=config.username,
@@ -117,30 +160,41 @@ def send_all():
                             use_tls=config.use_tls
                         )
                     else:
-                        connection = get_connection(backend=EMAIL_BACKEND)
-                    
+                        connection = get_connection(backend=mailer_email_backend)
                     
                 logging.info("sending message '{0}' to {1}".format(
-                    message.subject.encode("utf-8"),
-                    u", ".join(message.to_addresses).encode("utf-8"))
+                    message.subject,
+                    ", ".join(message.to_addresses))
                 )
                 email = message.email
                 if email is not None:
                     email.connection = connection
+                    if not hasattr(email, 'reply_to'):
+                        # Compatability fix for EmailMessage objects
+                        # pickled when running < Django 1.8 and then
+                        # unpickled under Django 1.8
+                        email.reply_to = []
+                    ensure_message_id(email)
                     email.send()
-                    MessageLog.objects.log(message, 1)  # @@@ avoid using literal result code
+
+                    # connection can't be stored in the MessageLog
+                    email.connection = None
+                    message.email = email  # For the sake of MessageLog
+                    MessageLog.objects.log(message, RESULT_SUCCESS)
                     sent += 1
                 else:
                     logging.warning("message discarded due to failure in converting from DB. Added on '%s' with priority '%s'" % (message.when_added, message.priority))  # noqa
                 message.delete()
 
-            except (socket_error, smtplib.SMTPSenderRefused, smtplib.SMTPRecipientsRefused, smtplib.SMTPAuthenticationError) as err:  # noqa
+            except (socket_error, smtplib.SMTPSenderRefused,
+                    smtplib.SMTPRecipientsRefused,
+                    smtplib.SMTPDataError,
+                    smtplib.SMTPAuthenticationError) as err:
                 message.defer()
                 logging.info("message deferred due to failure: %s" % err)
-                MessageLog.objects.log(message, 3, log_message=str(err))  # @@@ avoid using literal result code # noqa
+                MessageLog.objects.log(message, RESULT_FAILURE, log_message=str(err))
                 deferred += 1
-            finally:
-                # Get new connection
+                # Get new connection, it case the connection itself has an error.
                 connection = None
 
             # Check if we reached the limits for the current run
@@ -150,9 +204,7 @@ def send_all():
             _throttle_emails()
 
     finally:
-        logging.debug("releasing lock...")
-        lock.release()
-        logging.debug("released.")
+        release_lock(lock)
 
     logging.info("")
     logging.info("%s sent; %s deferred;" % (sent, deferred))

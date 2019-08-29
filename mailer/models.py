@@ -14,12 +14,37 @@ from django.db import models
 from django.utils.translation import ugettext_lazy as _
 
 
-PRIORITIES = (
-    ("1", "high"),
-    ("2", "medium"),
-    ("3", "low"),
-    ("4", "deferred"),
+PRIORITY_HIGH = "1"
+PRIORITY_MEDIUM = "2"
+PRIORITY_LOW = "3"
+PRIORITY_DEFERRED = "4"
+
+PRIORITIES = [
+    (PRIORITY_HIGH, "high"),
+    (PRIORITY_MEDIUM, "medium"),
+    (PRIORITY_LOW, "low"),
+    (PRIORITY_DEFERRED, "deferred"),
+]
+
+PRIORITY_MAPPING = dict((label, v) for (v, label) in PRIORITIES)
+
+RESULT_SUCCESS = "1"
+RESULT_DONT_SEND = "2"
+RESULT_FAILURE = "3"
+
+RESULT_CODES = (
+    (RESULT_SUCCESS, "success"),
+    (RESULT_DONT_SEND, "don't send"),
+    (RESULT_FAILURE, "failure"),
+    # @@@ other types of failure?
 )
+
+def get_message_id(msg):
+    # From django.core.mail.message: Email header names are case-insensitive
+    # (RFC 2045), so we have to accommodate that when doing comparisons.
+    for key, value in msg.extra_headers.items():
+        if key.lower() == 'message-id':
+            return value
 
 
 class MessageManager(models.Manager):
@@ -61,31 +86,35 @@ class MessageManager(models.Manager):
                 count += 1
         return count
 
+base64_encode = base64.encodebytes if hasattr(base64, 'encodebytes') else base64.encodestring
+base64_decode = base64.decodebytes if hasattr(base64, 'decodebytes') else base64.decodestring
+
 
 def email_to_db(email):
-    # pickle.dumps returns essentially binary data which we need to encode
-    # to store in a unicode field.
-    return base64.encodestring(pickle.dumps(email))
+    # pickle.dumps returns essentially binary data which we need to base64
+    # encode to store in a unicode field. finally we encode back to make sure
+    # we only try to insert unicode strings into the db, since we use a
+    # TextField
+    return base64_encode(pickle.dumps(email)).decode('ascii')
 
 
 def db_to_email(data):
-    if data == u"":
+    if data == "":
         return None
     else:
         try:
-            data = data.encode('utf-8')
+            data = data.encode("ascii")
         except AttributeError:
             pass
 
         try:
-            return pickle.loads(base64.decodestring(data), encoding='utf-8')
-        except (TypeError, pickle.UnpicklingError, base64.binascii.Error):
+            return pickle.loads(base64_decode(data))
+        except (TypeError, pickle.UnpicklingError, base64.binascii.Error, AttributeError):
             try:
                 # previous method was to just do pickle.dumps(val)
                 return pickle.loads(data)
-            except (TypeError, pickle.UnpicklingError):
+            except (TypeError, pickle.UnpicklingError, AttributeError):
                 return None
-
 
 class Message(models.Model):
 
@@ -104,12 +133,21 @@ class Message(models.Model):
         verbose_name = _("message")
         verbose_name_plural = _("messages")
 
+    def __str__(self):
+        try:
+            email = self.email
+            return "On {0}, \"{1}\" to {2}".format(self.when_added,
+                                                   email.subject,
+                                                   ", ".join(email.to))
+        except Exception:
+            return "<Message repr unavailable>"
+
     def defer(self):
-        self.priority = "4"
+        self.priority = PRIORITY_DEFERRED
         self.save()
 
-    def retry(self, new_priority=2):
-        if self.priority == "4":
+    def retry(self, new_priority=PRIORITY_MEDIUM):
+        if self.priority == PRIORITY_DEFERRED:
             self.priority = new_priority
             self.save()
             return True
@@ -143,7 +181,6 @@ set the attribute again to cause the underlying serialised data to be updated.""
             return email.subject
         else:
             return ""
-
 
 def filter_recipient_list(lst):
     if lst is None:
